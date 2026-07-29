@@ -27,44 +27,85 @@ void applyParametricEQ(ParametricEQ *eq, float *inputBuffer, float *outputBuffer
         // init Pre values
         static float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 
-        for (int i = 0; i < bufferSize; i++) {
+        for (int i = 0; i < bufferSize; i++)
+        {
             float x0 = inputBuffer[i];
+            // calc Post values
+            outputBuffer[i] = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
 
-        // calc Post values
-        outputBuffer[i] = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-
-        // update Pre values
-        x2 = x1;
-        x1 = x0;
-        y2 = y1;
-        y1 = outputBuffer[i];
-    }
+            // update Pre values
+            x2 = x1;
+            x1 = x0;
+            y2 = y1;
+            y1 = outputBuffer[i];
+        }
 }
 
 
 
 
 DreamEQAudioProcessor::DreamEQAudioProcessor()
-     : AudioProcessor (BusesProperties()
-                      #if ! JucePlugin_IsMidiEffect
-                       #if ! JucePlugin_IsSynth
-                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                       #endif
-                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       )
+    : AudioProcessor (BusesProperties()
+#if ! JucePlugin_IsMidiEffect
+#if ! JucePlugin_IsSynth
+        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+#endif
+        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+#endif
+    ),
+	parameters(*this, nullptr, "PARAMETER", createParameterLayout())
+ /*   parameters(*this,nullptr,juce::Identifier("Dream_EQ_Plugin"),
+                {
+                    std::make_unique<juce::AudioParameterFloat>(
+                    "cutoff_frequency", 
+                    "Cutoff Frequency",
+                    juce::NormalisableRange{20.f, 
+                                            20000.f, 
+                                            0.1f, 
+                                            0.2f, 
+                                            false},
+                    500.f),
+                    
+                    std::make_unique<juce::AudioParameterBool>(
+                    "highpass", 
+                    "Highpass", 
+                    false)
+                }) 
+*/
 {
- 
-    addParameter (new juce::AudioParameterFloat ("gain", "Gain", 0.0f, 1.0f, 1.0f));
-    addParameter (new juce::AudioParameterFloat("frequency", "Frequency", 20.0, 20000.0f, 1000.0f));
-    addParameter (new juce::AudioParameterFloat("gain_eq", "Gain EQ", -12.0f, 12.0f, 0.0f));
-    addParameter (new juce::AudioParameterFloat("q_factor", "Q Factor", 0.7f, 4.0f, 0.0f));
-
+                    //cutoffFrequencyParameter = parameters.getRawParameterValue("cutoff_frequency");
+                    //highpassParameter = parameters.getRawParameterValue("highpass");
 }
+
+
+                    
 
 DreamEQAudioProcessor::~DreamEQAudioProcessor()
 {
 }
+
+AudioProcessorValueTreeState::ParameterLayout DreamEQAudioProcessor::createParameterLayout()
+{
+	std::vector <std::unique_ptr<RangedAudioParameter>> params;
+
+	auto freqParam = std::make_unique<AudioParameterFloat>(FREQ_ID, FREQ_NAME, 20.0f, 20000.0f, 100.0f);
+	auto qParam = std::make_unique<AudioParameterFloat>(Q_ID, Q_NAME, 0.001f, 1.0f, 0.1f);
+	auto volumeParam = std::make_unique<AudioParameterFloat>(VOLUME_ID, VOLUME_NAME, -48.0f, 15.0f, 0.0f);
+	auto peakGainParam = std::make_unique<AudioParameterFloat>(PEAKGAIN_ID, PEAKGAIN_NAME, -48.0f, 30.0f, 0.0f);
+	auto filterChoiceParam = std::make_unique<AudioParameterFloat>(CHOICE_ID, CHOICE_NAME, NormalisableRange<float>(1, 4, 1), 1);
+	auto biquadChoiceParam = std::make_unique<AudioParameterFloat>(BIQCHOICE_ID, BIQCHOICE_NAME, NormalisableRange<float>(1, 7, 1), 1);
+
+	params.push_back(std::move(freqParam));
+	params.push_back(std::move(qParam));
+	params.push_back(std::move(volumeParam));
+	params.push_back(std::move(peakGainParam));
+	params.push_back(std::move(filterChoiceParam));
+	params.push_back(std::move(biquadChoiceParam));
+
+	return { params.begin(), params.end() };
+}
+
+
 
 const juce::String DreamEQAudioProcessor::getName() const
 {
@@ -137,11 +178,21 @@ void DreamEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     eq.gain = 6.0f;        
     eq.Q = 1.0f;     
     
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    LHPfilter.setSamplingRate(static_cast<float>(sampleRate));
+    
+    for (int channel = 0; channel < kChannels; channel++)
+	{
+		Dfilter[channel].prepareToPlay(sampleRate, samplesPerBlock);
+	//	biQ[channel].setBiquad(bq_type_lowpass, 0.5, 0.707, 0);
+	}
+    
+    //juce::ignoreUnused (sampleRate, samplesPerBlock);
 }
 
 void DreamEQAudioProcessor::releaseResources()
 {
+   // When playback stops, you can use this as an opportunity to free up any
+    // spare memory, etc.
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -173,33 +224,73 @@ void DreamEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
+    float sliderFreqValue = ((*parameters.getRawParameterValue(FREQ_ID) / 20000) * 0.49);
+	float sliderFrequencyValue = *parameters.getRawParameterValue(FREQ_ID);
+	float sliderQValue = *parameters.getRawParameterValue(Q_ID);
+	float sliderVolumeValue = *parameters.getRawParameterValue(VOLUME_ID);
+	float sliderPeakGainValue = *parameters.getRawParameterValue(PEAKGAIN_ID);
+    
+       
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
   
-    juce::AudioProcessorParameter* gainParameter = getParameters()[0];
-    float gain = gainParameter->getValue();
+  //  juce::AudioProcessorParameter* gainParameter = getParameters()[0];
+  //  float gain = gainParameter->getValue();
 
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
-        float* channelData = buffer.getWritePointer(channel);
-    
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        // in data
+        const float* inputData = buffer.getReadPointer(channel);
+    	
+        float* outputData = buffer.getWritePointer(channel);
+        
+        // place samples into buff
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
         {
-                             
-           channelData[i] *=gain;
+            //get current value from read pointer
+			float inputSample = inputData[sample];                 
+            
+            switch ((int)filterChoice) 
+            {
+			    case FIRHiPass:
+    				outputData[sample] = Dfilter[channel].simpleFIRHiPass(inputSample, sliderFreqValue);
+				    break;
+
+			    case IIRLowPass:
+    				outputData[sample] = Dfilter[channel].simpleIIRLowPass(inputSample, sliderFreqValue);
+				    break;
+
+			    case BiquadFilter:
+				    Dfilter[channel].setBiquad((int)biquadChoice, sliderFrequencyValue, sliderQValue, sliderPeakGainValue);
+				    outputData[sample] = Dfilter[channel].processBiquad(inputSample);
+				    //Dfilter[channel].setButterworth(sliderFrequencyValue);
+				    //outputData[channel] = Dfilter[channel].processButterworth(inputSample);
+				    break;
+			    case Bilinear:
+				    Dfilter[channel].setButterworth((int)biquadChoice, sliderFrequencyValue, sliderQValue, sliderPeakGainValue);
+				    outputData[sample] = Dfilter[channel].processButterworth(inputSample);
+			}  
+            outputData[sample] = outputData[sample] * Decibels::decibelsToGain(sliderVolumeValue);
+            
+            ///channelData[i] *=gain;
         }
         //  applyParametricEQ(&eq, buffer., buffer, sizeof(buffer));
 
     }
+  /*--------------------------LHP_filter_block----------------------------------  */  
+ /*   // retrieve and set the parameter values
+    const auto cutoffFrequency = cutoffFrequencyParameter->load();
+    // in C++, std::atomic<T> to T conversion is equivalent to a load
+    const auto highpass = *highpassParameter < 0.5f ? false : true;
+    LHPfilter.setCutoffFrequency(cutoffFrequency);
+    LHPfilter.setHighpass(highpass);
+
+    // perform filtering
+    LHPfilter.processBlock(buffer, midiMessages);
    
-   
-   
-   
-   
-   
-   
-        // TODO: your DSP goes here
+ */
+    // TODO: Add additional DSP code here
 }
 
 bool DreamEQAudioProcessor::hasEditor() const
@@ -209,8 +300,8 @@ bool DreamEQAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* DreamEQAudioProcessor::createEditor()
 {
-    //return new DreamEQAudioProcessorEditor (*this);
-    return new GenericAudioProcessorEditor (*this);
+    return new DreamEQAudioProcessorEditor (*this,parameters);
+    //return new GenericAudioProcessorEditor (*this);
 }
 
 void DreamEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -218,14 +309,22 @@ void DreamEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // You should use this method to store your parameters in the memory block.
     // You could do that either as raw data, or use the XML or ValueTree classes
     // as intermediaries to make it easy to save and load complex data.
-
+    std::unique_ptr<XmlElement> xml(parameters.state.createXml());
+	copyXmlToBinary(*xml, destData);
 }
 
 void DreamEQAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     // You should use this method to restore your parameters from this memory block,
     // whose contents will have been created by the getStateInformation() call.
-
+	std::unique_ptr<XmlElement> theParams(getXmlFromBinary(data, sizeInBytes));
+	if (theParams != nullptr)
+	{
+		if (theParams->hasTagName(parameters.state.getType()))
+		{
+			parameters.state = ValueTree::fromXml(*theParams);
+		}
+	}
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
